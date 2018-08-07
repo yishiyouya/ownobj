@@ -1,0 +1,37 @@
+package com.hundsun.network.hspay.common.domain;
+
+import java.io.Serializable;
+import java.util.Map;
+
+/**
+* ocr响应结果
+* @author </a href="hugy20570@hundsun.com">hugy20570</a>
+* @version $Id: OcrResponseResult.java, v 0.1 2018年1月26日 下午4:55:45 hspcadmin Exp $ 
+* @since 2.0
+ */
+public class OcrResponseResult implements Serializable{
+    
+     /**    */
+    private static final long serialVersionUID = 6378755012716125142L;
+    private String error;
+    private String details;
+    private Map<String,String>    result;
+    public String getError() {
+        return error;
+    }
+    public void setError(String error) {
+        this.error = error;
+    }
+    public String getDetails() {
+        return details;
+    }
+    public void setDetails(String details) {
+        this.details = details;
+    }
+    public Map<String, String> getResult() {
+        return result;
+    }
+    public void setResult(Map<String, String> result) {
+        this.result = result;
+    }
+}

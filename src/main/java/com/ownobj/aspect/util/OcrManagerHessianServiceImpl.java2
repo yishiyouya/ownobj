@@ -1,0 +1,151 @@
+package com.hundsun.network.buisness.manager.impl;
+
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import com.alibaba.fastjson.JSONObject;
+import com.hundsun.network.front.util.DateUtil;
+import com.hundsun.network.hspay.common.domain.HttpBackupBean;
+import com.hundsun.network.hspay.common.domain.OcrRequest;
+import com.hundsun.network.hspay.common.domain.OcrResponse;
+import com.hundsun.network.hspay.common.domain.OcrResponseResult;
+import com.hundsun.network.hspay.common.enums.EnumBeqType;
+import com.hundsun.network.hspay.common.enums.EnumBooleanFlag;
+import com.hundsun.network.hspay.common.enums.EnumBspType;
+import com.hundsun.network.hspay.common.enums.EnumOcrRecoType;
+import com.hundsun.network.hspay.common.enums.EnumTradeTypeView;
+import com.hundsun.network.hspay.common.service.HttpBackupService;
+import com.hundsun.network.hspay.util.HttpHelper;
+import com.hundsun.network.hspay.util.SerialNumUtils;
+import com.hundsun.network.hspay.util.StringUtils;
+import com.hundsun.network.ipay.util.ICGBUtil.HttpUtils;
+import com.hundsun.network.service.OcrManagerHessianService;
+
+/**
+* ocr识别服务实现
+* @author </a href="hugy20570@hundsun.com">hugy20570</a>
+* @version $Id: OcrManagerServiceImpl.java, v 0.1 2018年1月26日 下午3:43:31 hspcadmin Exp $ 
+* @since 2.0
+ */
+@Service("ocrManagerHessianService")
+public class OcrManagerHessianServiceImpl implements OcrManagerHessianService {
+    protected static Logger                  log      = LoggerFactory
+        .getLogger(OcrManagerHessianServiceImpl.class);
+    private @Value("${ocr.url}") String      url;
+    private @Value("${ocr.userName}") String userName;
+    private @Value("${ocr.password}") String password;
+    @Value("${swiftpass.agency.ip}") 
+    private String agencyIp;
+    @Value("${swiftpass.agency.port}") 
+    private int agencyPort;
+    private final static String              encoding = "UTF-8";    
+    public @Value("${icgb.bindRetUrl}") String sendUrl;
+
+    @Autowired
+    private HttpBackupService httpBackupService;
+    /**
+     * ocr查询
+     * @param request
+     * @return
+     * @see com.hundsun.network.buisness.manager.OcrManagerService#ocrQuery(com.hundsun.network.buisness.domain.request.OcrRequest)
+     */
+    @Override
+    public OcrResponse ocrQuery(OcrRequest request) {
+        OcrResponse response = new OcrResponse();
+        String errorMsg = judgeOcr(request);
+        if (StringUtils.isNotBlank(errorMsg)) {
+            response.setReturnCode("0001");
+            response.setReturnMsg(errorMsg);
+            return response;
+        }
+        Map<String, String> param = new HashMap<String, String>();
+        param.put("username", userName);
+        param.put("password", password);
+        param.put("recotype", request.getRecoType());
+        param.put("image", request.getImage());
+        param.put("encoding", encoding);
+        param.put("crop_image", request.getCropImage());
+        param.put("b64", EnumBooleanFlag.YES.getCode());
+        if (EnumOcrRecoType.ID_CARD.getCode().equals(request.getRecoType())) {
+            param.put("head_portrait", EnumBooleanFlag.NO.getCode());
+        }
+        if (StringUtils.isNotBlank(request.getEncoding())) {
+            param.put("encoding", request.getEncoding());
+        }
+     // 备份发送报文
+        HttpBackupBean bean = this.getHttpBackupBean();//备份报文的公共部分
+        bean.setBuisType(EnumTradeTypeView.SHOW_VIEW_OCR.getName());
+        bean.setChannelSeq(SerialNumUtils.getChannelSeq24());
+        bean.setReqType(EnumBeqType.BEQ_2.getCode());
+        long reqTime = System.currentTimeMillis();
+        bean.setReqParam(param.toString());        
+        String post = null;
+        try {
+            if(StringUtils.isEmpty(agencyIp)){
+                post = HttpHelper.post(url, param);
+            }else{
+                post = HttpHelper.post(url, param,agencyIp,agencyPort,true);
+            }
+        } catch (Exception e) {
+            log.error("调用OCR失败:", e);
+            response.setErrorCode("9999");
+            response.setReturnCode("9999");
+            response.setReturnMsg("ocr调用失败！");
+            response.setSuccess(false);
+            return response;
+        }
+        
+        bean.setRspTime((System.currentTimeMillis() - reqTime) + "");
+        bean.setRspContent(post);
+        httpBackupService.addNewRecordSync(bean);
+        String replace = post.replace("Error", "error").replace("Details", "details")
+            .replace("Result", "result");
+        Object parse = JSONObject.parseObject(replace, OcrResponseResult.class);
+        OcrResponseResult result = (OcrResponseResult) parse;
+        response.setOcrResponseResult(result);
+        response.setSuccess(true);
+        return response;
+    }
+
+    /**
+     * 请求参数校验
+     * @param request
+     * @return
+     */
+    protected String judgeOcr(OcrRequest request) {
+        String returnMsg = "";
+        if (request == null) {
+            returnMsg = "OCR请求对象不能为空";
+        } else if (StringUtils.isBlank(request.getImage())) {
+            returnMsg = "图片内容不能为空";
+        } else if (StringUtils.isBlank(request.getRecoType())) {
+            returnMsg = "识别类型不能为空";
+        } else if (StringUtils.isBlank(request.getCropImage())) {
+            returnMsg = "是否返回切边不能为空";
+        }
+        return returnMsg;
+    }
+    
+    /**
+     * getHttpBackupBean()
+     * 备份发送报文的部分公共信息
+     * @return
+     */
+    private HttpBackupBean getHttpBackupBean(){
+        HttpBackupBean bean = new HttpBackupBean();
+        bean.setClassName(this.getClass().getName());
+        bean.setConnTimeout(HttpHelper.CONNTIMEOUT);
+        bean.setReadTimeout(HttpHelper.READTIMEOUT);
+        bean.setReqUri(sendUrl);
+        bean.setRspType(EnumBspType.BSP_1.getCode());//响应类型 1.文本 2.混合
+        bean.setReqTime(DateUtil.getMilliSecondString(new Date()));
+        return bean;
+    }
+}

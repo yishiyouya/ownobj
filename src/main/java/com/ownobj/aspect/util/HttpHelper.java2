@@ -1,0 +1,757 @@
+package com.hundsun.network.hspay.util;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.UnsupportedEncodingException;
+import java.net.InetSocketAddress;
+import java.net.MalformedURLException;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.commons.httpclient.ConnectTimeoutException;
+import org.apache.commons.httpclient.HttpException;
+import org.apache.commons.httpclient.MultiThreadedHttpConnectionManager;
+import org.apache.commons.httpclient.methods.GetMethod;
+import org.apache.http.HttpEntity;
+import org.apache.http.HttpHost;
+import org.apache.http.HttpResponse;
+import org.apache.http.NameValuePair;
+import org.apache.http.client.ClientProtocolException;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.entity.UrlEncodedFormEntity;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.conn.params.ConnRoutePNames;
+import org.apache.http.entity.ByteArrayEntity;
+import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.message.BasicNameValuePair;
+import org.apache.http.params.CoreConnectionPNames;
+import org.apache.http.params.CoreProtocolPNames;
+import org.apache.http.util.EntityUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * http请求帮助类<br>
+ * 提供返回字符串和返回封装对象两种方式<br>
+ * 如果返回的状态码是以7打头  请求可能已经发送成功但是读取响应失败<br>
+ * 如果返回状态码是499，一般认为是连接超时，请求未送达。但不建议作为判断的绝对条件。<br>
+ * 如需获取响应状态 则调用 HttpHelper.HttpRespWrap wrap = HttpHelper.sendAndReturnStats(url, req);<br>
+ * @author wuxg15844
+ *
+ */
+public class HttpHelper {
+
+	protected static Logger log = LoggerFactory.getLogger(HttpHelper.class);
+	
+	
+	 private static final String ENCODING="UTF-8";
+	 public static final Integer CONNTIMEOUT = 4000;
+	 public static final Integer READTIMEOUT = 90000;
+	 public static final Integer FILE_READTIMEOUT = 600000;//默认文件下载读取超时为10分钟
+	 
+	 /**
+	  * 单次心跳检测<br>
+	  * 在发送http协议前先通过tcp协议确保连接正常<br>
+	  * 频繁调用此方法会消耗性能，建议只有在重要或大量请求前才调用<br>
+	  * @param ip  
+	  * @param port
+	  * @param timeout
+	  * @return true 可以成功连接  false 不能连接
+	  */
+	 public static boolean detectionTCPConnect(String ip,int port,int timeout){
+		 Socket client = new Socket();
+		try {
+			client.connect(new InetSocketAddress(ip,port),timeout);
+			return true;
+		}catch(SocketTimeoutException t){
+			log.error("连接检测失败：连接超时", t);
+			return false;
+		}catch (IOException e){
+			log.error("连接检测失败：IO异常", e);
+			return false;
+		}finally{
+			try {
+				client.close();
+			} catch (IOException e) {
+			}
+		}
+	 }
+	 
+	 
+	/**
+	 * 简单请求 直接返回响应字符串
+	 * @param url
+	 * @param reqStr
+	 * @return
+	 */
+	 public static String simpleSendPost(String url, String reqStr){
+		return  simpleSendPost(url,reqStr,CONNTIMEOUT,READTIMEOUT);
+		 
+	 }
+	 
+	 /**
+		 * 简单请求 直接返回响应字符串
+		 * @param url
+		 * @param reqStr
+		 * @return
+		 */
+		 public static String simpleSendPost(String url, String reqStr,Integer connTimeout,Integer readTimeout){
+			 HttpRespWrap wrap = sendPostAndReturnStats(url,reqStr,connTimeout,readTimeout);
+			 int stats = wrap.getStats();
+			 if(stats>=200&&stats<300){
+				 log.info("_________________________请求成功");
+				 return wrap.getResponse();
+			 }
+			 if(stats>=300&&stats<400){
+				 log.info("_________________________请求被重定向");
+				 return wrap.getResponse();
+			 }
+			 if(stats>=400&&stats<500){
+				 log.info("_________________________请求错误");
+				 return "请求错误";
+			 }
+			 if(stats>=500&&stats<600){
+				 log.info("_________________________服务器内部错误");
+				 return "服务器内部错误";
+			 }else{
+				 return wrap.getResponse(); 
+			 }
+		 }
+	 
+	 public static HttpRespWrap sendPostAndReturnStats(String url, String reqStr){
+		 return sendPostAndReturnStats(url, reqStr,CONNTIMEOUT,READTIMEOUT);//设置默认超时
+	 }
+
+	public static HttpRespWrap sendPostAndReturnStats(String url, String reqStr,String proxyIp,int proxyPort,boolean expectContinue){
+		return sendPostAndReturnStats(url, reqStr,CONNTIMEOUT,READTIMEOUT,proxyIp,proxyPort,expectContinue);//设置默认超时
+	}
+
+	/**
+	 * @param url
+	 * @param reqStr  请求字符串
+	 * @param connTimeout 连接超时(毫秒)
+	 * @param readTimeout 响应超时(毫秒)
+	 * @return HttpRespWrap:{Stats:500/404/200.. ,response:rspStr}
+	 */
+	public static HttpRespWrap sendPostAndReturnStats(String url, String reqStr,Integer connTimeout,Integer readTimeout,String proxyIp,int proxyPort,boolean expectContinue){
+		HttpRespWrap resp = new HttpRespWrap();
+		String result = "";
+		int stats = 0;
+		HttpResponse response;
+		URL _url;
+		URI uri;
+		try {
+			_url = new URL(url);
+		} catch (MalformedURLException e1) {
+			log.error("无效的请求,请校验请求格式:\r\n",e1);
+			resp.setStats(496);
+			resp.setResponse("无效的请求,请校验请求格式:" + url);
+			return resp;
+		}
+		try {
+//			uri = new URI(_url.getProtocol(), _url.getHost(), _url.getPath(), _url.getQuery(), null);
+			uri = new URI(_url.getProtocol(),null, _url.getHost(), _url.getPort(), _url.getPath(),_url.getQuery(), null);
+		} catch (URISyntaxException e1) {
+			log.error("无效的请求,请校验请求内容(特殊字符):\r\n",e1);
+			resp.setStats(496);
+			resp.setResponse("无效的请求,请校验请求内容(特殊字符):" + url);
+			return resp;
+		}
+		HttpClient httpClient = new DefaultHttpClient();
+		HttpPost httpPost = new HttpPost(uri);
+		httpClient.getParams().setParameter(
+				CoreConnectionPNames.CONNECTION_TIMEOUT, connTimeout);// 连接超时：connectionTimeout
+		httpClient.getParams().setParameter(CoreConnectionPNames.SO_TIMEOUT,
+				readTimeout);// 读取数据超时：soTimeout
+		if(StringUtils.isNotEmpty(proxyIp)){
+			HttpHost proxyHost = new HttpHost(proxyIp,proxyPort);
+			httpClient.getParams().setParameter(ConnRoutePNames.DEFAULT_PROXY,proxyHost);
+			if(expectContinue){
+			    httpClient.getParams().setBooleanParameter(CoreProtocolPNames.USE_EXPECT_CONTINUE, false);
+			}
+		}
+		byte[] xmlDatas;
+		try {
+			xmlDatas = reqStr.getBytes(ENCODING);
+			httpPost.setEntity(new ByteArrayEntity(xmlDatas));
+			response = httpClient.execute(httpPost);
+			stats = response.getStatusLine().getStatusCode();
+			result = EntityUtils.toString(response.getEntity(),
+					ENCODING);
+			resp.setStats(stats);
+			resp.setResponse(result);
+		} catch (ConnectTimeoutException e) {
+			log.error("请求超时:\r\n",e);
+			resp.setStats(499);
+			resp.setResponse("请求超时,url:" + url);
+		}  catch (SocketTimeoutException e) {
+			log.error("响应超时:\r\n",e);
+			resp.setStats(702);
+			resp.setResponse("响应超时,url:" + url);
+		} catch (ClientProtocolException e) {
+			log.error("协议不匹配:\r\n",e);
+			resp.setStats(497);
+			resp.setResponse("协议不匹配:" + url.substring(0, url.indexOf(":")));
+		} catch (IOException e) {
+			log.error("IO异常:\r\n",e);
+			resp.setStats(701);
+			resp.setResponse("IO异常");
+		} finally {
+			if (httpClient != null) {
+				httpClient.getConnectionManager().shutdown();
+				httpPost.abort();
+			}
+		}
+		log.info("http请求路径: "+url);
+		log.info("http响应码: " +resp.getStats());
+		log.info("http响应内容: "+StringUtils.getSuitableData(resp.getResponse(),400));
+		return resp;
+	}
+	 
+	/**
+	 * @param url
+	 * @param reqStr  请求字符串
+	 * @param connTimeout 连接超时(毫秒)
+	 * @param readTimeout 响应超时(毫秒)
+	 * @return HttpRespWrap:{Stats:500/404/200.. ,response:rspStr}
+	 */
+	public static HttpRespWrap sendPostAndReturnStats(String url, String reqStr,Integer connTimeout,Integer readTimeout){
+		HttpRespWrap resp = new HttpRespWrap();
+		String result = "";
+		int stats = 0;
+		HttpResponse response;
+		URL _url;
+		URI uri;
+		try {
+			_url = new URL(url);
+		} catch (MalformedURLException e1) {
+			log.error("无效的请求,请校验请求格式:\r\n",e1);
+			resp.setStats(496);
+			resp.setResponse("无效的请求,请校验请求格式:" + url);
+			return resp;
+		}
+		try {
+//			uri = new URI(_url.getProtocol(), _url.getHost(), _url.getPath(), _url.getQuery(), null);
+			uri = new URI(_url.getProtocol(),null, _url.getHost(), _url.getPort(), _url.getPath(),_url.getQuery(), null);
+		} catch (URISyntaxException e1) {
+			log.error("无效的请求,请校验请求内容(特殊字符):\r\n",e1);
+			resp.setStats(496);
+			resp.setResponse("无效的请求,请校验请求内容(特殊字符):" + url);
+			return resp;
+		}
+		HttpClient httpClient = new DefaultHttpClient();
+		HttpPost httpPost = new HttpPost(uri);
+		httpClient.getParams().setParameter(
+				CoreConnectionPNames.CONNECTION_TIMEOUT, connTimeout);// 连接超时：connectionTimeout
+		httpClient.getParams().setParameter(CoreConnectionPNames.SO_TIMEOUT,
+				readTimeout);// 读取数据超时：soTimeout
+		byte[] xmlDatas;
+		try {
+			xmlDatas = reqStr.getBytes(ENCODING);
+			httpPost.setEntity(new ByteArrayEntity(xmlDatas));
+			response = httpClient.execute(httpPost);
+			stats = response.getStatusLine().getStatusCode();
+			result = EntityUtils.toString(response.getEntity(),
+					ENCODING);
+			resp.setStats(stats);
+			resp.setResponse(result);
+		} catch (ConnectTimeoutException e) {
+			log.error("请求超时:\r\n",e);
+			resp.setStats(499);
+			resp.setResponse("请求超时,url:" + url);
+		}  catch (SocketTimeoutException e) {
+			log.error("响应超时:\r\n",e);
+			resp.setStats(702);
+			resp.setResponse("响应超时,url:" + url);
+		} catch (ClientProtocolException e) {
+			log.error("协议不匹配:\r\n",e);
+			resp.setStats(497);
+			resp.setResponse("协议不匹配:" + url.substring(0, url.indexOf(":")));
+		} catch (IOException e) {
+			log.error("IO异常:\r\n",e);
+			resp.setStats(701);
+			resp.setResponse("IO异常");
+		} finally {
+			if (httpClient != null) {
+				httpClient.getConnectionManager().shutdown();
+				httpPost.abort();
+			}
+		}
+		log.info("http请求路径: "+url);
+		log.info("http响应码: " +resp.getStats());
+		log.info("http响应内容: "+StringUtils.getSuitableData(resp.getResponse(),400));
+		return resp;
+	}
+	
+	/**
+	 * 以默认的1秒连接超时10分钟
+	 * 获取下载流  请求失败返回null
+	 * @param url
+	 * @return InputStream 文件流
+	 */
+	public static InputStream getFileDownLoadStream(String url){
+		return getFileDownLoadStream(url,CONNTIMEOUT,FILE_READTIMEOUT);
+	}
+	
+	/**
+	 * 获取下载流  请求失败返回null
+	 * @param url
+	 * @param connTimeout  连接超时
+	 * @param readTimeout	读取超时
+	 * @return  InputStream 文件流
+	 */
+	public static InputStream getFileDownLoadStream(String url,Integer connTimeout,Integer readTimeout){
+		HttpRespWrap wrap =  getFileDownLoad(url,connTimeout,readTimeout);
+		return wrap==null?null:wrap.getRspStream();
+	}
+	
+	/**
+	 * 以默认的1秒连接超时10分钟读取超时 GET请求下载流
+	 * @param url
+	 * @return
+	 */
+	public static HttpRespWrap getFileDownLoad(String url){
+		return getFileDownLoad(url,CONNTIMEOUT,FILE_READTIMEOUT);
+	}
+	
+	
+	/**
+	 * get请求获取流
+	 * @param url 请求地址
+	 * @param connTimeout 连接超时
+	 * @param readTimeout  读取流超时
+	 * @return HttpRespWrap{stats:状态码,rspStream:输入流}
+	 * @author wuxg15844 151105
+	 */
+	public static HttpRespWrap getFileDownLoad(String url,Integer connTimeout,Integer readTimeout){
+		HttpRespWrap resp = new HttpRespWrap();
+		int stats = 0;
+		InputStream rspStream;
+		URL _url;
+		URI uri;
+		try {
+			_url = new URL(url);
+		} catch (MalformedURLException e1) {
+			log.error("无效的请求,请校验请求格式:\r\n", e1);
+			resp.setStats(496);
+			resp.setResponse("无效的请求,请校验请求格式:" + url);
+			return resp;
+		}
+		try {
+			uri = new URI(_url.getProtocol(), null, _url.getHost(),
+					_url.getPort(), _url.getPath(), _url.getQuery(), null);
+		} catch (URISyntaxException e1) {
+			log.error("无效的请求,请校验请求内容(特殊字符):\r\n", e1);
+			resp.setStats(496);
+			resp.setResponse("无效的请求,请校验请求内容(特殊字符):" + url);
+			return resp;
+		}
+		MultiThreadedHttpConnectionManager connectionManager = new MultiThreadedHttpConnectionManager();
+		GetMethod httpGet = new GetMethod(uri.toString());
+		org.apache.commons.httpclient.HttpClient client = new org.apache.commons.httpclient.HttpClient(connectionManager);
+		client.getParams().setParameter(CoreConnectionPNames.CONNECTION_TIMEOUT,connTimeout);
+		client.getParams().setParameter(CoreConnectionPNames.SO_TIMEOUT,readTimeout);
+		try {
+			stats = client.executeMethod(httpGet);
+		}catch (ConnectTimeoutException e) {
+			log.error("连接超时:uri：[" + uri.toString()+"]   timeout:["+connTimeout+"]", e);
+			resp.setStats(499);
+			resp.setResponse("请求超时,uri:" + url);
+			//stats = 1001;
+			return resp;
+		}catch (HttpException e) {
+			log.error("服务器无法请求下载文件uri：" + uri.toString(), e);
+			resp.setStats(599);
+			return resp;
+		} catch (IOException e) {
+			log.error("http请求失败：IO异常：", e);
+			resp.setStats(699);
+			return resp;
+		}
+		try {
+			rspStream = httpGet.getResponseBodyAsStream();
+		} catch (IOException e) {
+			log.error("获取http请求响应流：IO异常：", e);
+			resp.setStats(799);
+			return resp;
+		}
+		resp.setStats(stats);
+		resp.setRspStream(rspStream);
+        return resp;  
+	}
+
+	public static HttpRespWrap sendPostByEncoding(String url, String reqStr,String encoding)throws Exception{
+		if(url.contains("https://")){
+			return doPostHttpsXml( url, reqStr, CONNTIMEOUT,READTIMEOUT,encoding);
+		}
+        return sendPostByEncoding(url, reqStr,CONNTIMEOUT,READTIMEOUT,encoding);//设置默认超时
+    }
+	
+	private static HttpRespWrap sendPostByEncoding(String url, String reqStr, Integer connTimeout,
+                                                   Integer readTimeout, String encoding) {
+	    HttpRespWrap resp = new HttpRespWrap();
+        String result = "";
+        int stats = 0;
+        HttpResponse response;
+        URL _url;
+        URI uri;
+        try {
+            _url = new URL(url);
+        } catch (MalformedURLException e1) {
+            log.error("无效的请求,请校验请求格式:\r\n",e1);
+            resp.setStats(496);
+            resp.setResponse("无效的请求,请校验请求格式:" + url);
+            return resp;
+        }
+        try {
+//          uri = new URI(_url.getProtocol(), _url.getHost(), _url.getPath(), _url.getQuery(), null);
+            uri = new URI(_url.getProtocol(),null, _url.getHost(), _url.getPort(), _url.getPath(),_url.getQuery(), null);
+        } catch (URISyntaxException e1) {
+            log.error("无效的请求,请校验请求内容(特殊字符):\r\n",e1);
+            resp.setStats(496);
+            resp.setResponse("无效的请求,请校验请求内容(特殊字符):" + url);
+            return resp;
+        }
+        HttpClient httpClient = new DefaultHttpClient();
+        HttpPost httpPost = new HttpPost(uri);
+        httpClient.getParams().setParameter(
+                CoreConnectionPNames.CONNECTION_TIMEOUT, connTimeout);// 连接超时：connectionTimeout
+        httpClient.getParams().setParameter(CoreConnectionPNames.SO_TIMEOUT,
+                readTimeout);// 读取数据超时：soTimeout
+        byte[] xmlDatas;
+        try {
+            xmlDatas = reqStr.getBytes(encoding);
+            httpPost.setEntity(new ByteArrayEntity(xmlDatas));
+            response = httpClient.execute(httpPost);
+            stats = response.getStatusLine().getStatusCode();
+            result = EntityUtils.toString(response.getEntity(),
+                encoding);
+            resp.setStats(stats);
+            resp.setResponse(result);
+        } catch (ConnectTimeoutException e) {
+            log.error("请求超时:\r\n",e);
+            resp.setStats(499);
+            resp.setResponse("请求超时,url:" + url);
+        }  catch (SocketTimeoutException e) {
+            log.error("响应超时:\r\n",e);
+            resp.setStats(702);
+            resp.setResponse("响应超时,url:" + url);
+        } catch (ClientProtocolException e) {
+            log.error("协议不匹配:\r\n",e);
+            resp.setStats(497);
+            resp.setResponse("协议不匹配:" + url.substring(0, url.indexOf(":")));
+        } catch (IOException e) {
+            log.error("IO异常:\r\n",e);
+            resp.setStats(701);
+            resp.setResponse("IO异常");
+        } finally {
+            if (httpClient != null) {
+                httpClient.getConnectionManager().shutdown();
+                httpPost.abort();
+            }
+        }
+        log.info("http请求路径: "+url);
+        log.info("http响应码: " +resp.getStats());
+        log.info("http响应内容: "+StringUtils.getSuitableData(resp.getResponse(),400));
+        return resp;
+    }
+
+
+    public static void main(String[] args) {
+		String url = "http://113.108.207.154:29085/ibank/service/financeRequest";
+		String req = "aa";
+		HttpHelper.HttpRespWrap wrap = HttpHelper.sendPostAndReturnStats(url, req);
+	}
+	
+	
+	
+	
+	
+	/**
+	 * 响应封装类
+	 * @author wuxg15844 151020
+	 */
+	public static class HttpRespWrap{
+		private Integer stats;
+		private String response;
+		private InputStream rspStream;
+		/**
+		 * http响应码[200:成功,499:连接超时,498:读取超时,404:服务器找不到请求的内容,500:服务器内部异常,701:自定义异常]
+		 * @return
+		 */
+		public Integer getStats() {
+			return stats;
+		}
+		public String getResponse() {
+			return response;
+		}
+		protected void setStats(Integer stats) {
+			this.stats = stats;
+		}
+		protected void setResponse(String response) {
+			this.response = response;
+		}
+		public InputStream getRspStream() {
+			return rspStream;
+		}
+		public void setRspStream(InputStream rspStream) {
+			this.rspStream = rspStream;
+		}
+		
+		/**
+		 * 是否直接成功 ：返回状态码200-299
+		 * @return
+		 */
+		public boolean isSuccessDirect(){
+			return this.getStats()>=200&&this.getStats()<300;
+		}
+		/**
+		 * 是否被转发成功 ：返回状态码300-399
+		 * @return
+		 */
+		public boolean isSuccessTransmit(){
+			return this.getStats()>=300&&this.getStats()<400;
+		}
+		
+	}
+	
+	 /**
+	 * post传参请求
+	 * @param url
+	 * @param paramMap
+	 * @return
+	 */
+	public static String post(String url, Map<String, String> paramMap){
+	     HttpRespWrap wrap = post(url,paramMap,ENCODING,CONNTIMEOUT,READTIMEOUT);
+         int stats = wrap.getStats();
+         if(stats>=200&&stats<300){
+             log.info("_________________________请求成功");
+             return wrap.getResponse();
+         }
+         if(stats>=300&&stats<400){
+             log.info("_________________________请求被重定向");
+             return wrap.getResponse();
+         }
+         if(stats>=400&&stats<500){
+             log.info("_________________________请求错误");
+             return "请求错误";
+         }
+         if(stats>=500&&stats<600){
+             log.info("_________________________服务器内部错误");
+             return "服务器内部错误";
+         }else{
+             return wrap.getResponse(); 
+         }
+	 }
+	/**
+     * post传参请求
+     * @param url
+     * @param paramMap
+     * @return
+     */
+    public static String post(String url, Map<String, String> paramMap,String agencyIp,int proxyPort,boolean expectContinue){
+         HttpRespWrap wrap = post(url,paramMap,ENCODING,CONNTIMEOUT,READTIMEOUT,agencyIp,proxyPort,expectContinue);
+         int stats = wrap.getStats();
+         if(stats>=200&&stats<300){
+             log.info("_________________________请求成功");
+             return wrap.getResponse();
+         }
+         if(stats>=300&&stats<400){
+             log.info("_________________________请求被重定向");
+             return wrap.getResponse();
+         }
+         if(stats>=400&&stats<500){
+             log.info("_________________________请求错误");
+             return "请求错误";
+         }
+         if(stats>=500&&stats<600){
+             log.info("_________________________服务器内部错误");
+             return "服务器内部错误";
+         }else{
+             return wrap.getResponse(); 
+         }
+     }
+	/**
+	 * post请求传参map
+	 * @param url
+	 * @param paramMap
+	 * @param encode
+	 * @param connTimeout
+	 * @param readTimeout
+	 * @return
+	 * @throws IOException
+	 */
+	public static HttpRespWrap  post(String url, Map<String, String> paramMap, String encode,Integer connTimeout,Integer readTimeout) {
+           HttpRespWrap resp = new HttpRespWrap();
+           DefaultHttpClient httpClient = new DefaultHttpClient();
+           List<NameValuePair> params = new ArrayList<NameValuePair>();
+           for (String key : paramMap.keySet()) {
+                params.add(new BasicNameValuePair(key,  paramMap.get(key)));
+           }
+           httpClient.getParams().setParameter(CoreConnectionPNames.CONNECTION_TIMEOUT, connTimeout);
+           httpClient.getParams().setParameter(CoreConnectionPNames.SO_TIMEOUT,readTimeout);
+           HttpPost httpPost = new HttpPost(url);
+           try {
+              
+               UrlEncodedFormEntity ent = new UrlEncodedFormEntity(params, encode);
+               httpPost.setEntity(ent);
+               HttpResponse response = httpClient.execute(httpPost);
+               String html = EntityUtils.toString(response.getEntity(),ENCODING);
+               log.info("http响应码:"+response.getStatusLine().getStatusCode());
+               resp.setStats(response.getStatusLine().getStatusCode());
+               resp.setResponse(html);
+               return resp;
+           }catch (UnsupportedEncodingException e) {
+               log.error("请求编码异常:\r\n",e);
+               resp.setStats(500);
+               resp.setResponse("请求超时,url:" + url);
+           }catch (ConnectTimeoutException e) {
+               log.error("请求超时:\r\n",e);
+               resp.setStats(499);
+               resp.setResponse("请求超时,url:" + url);
+           }  catch (SocketTimeoutException e) {
+               log.error("响应超时:\r\n",e);
+               resp.setStats(702);
+               resp.setResponse("响应超时,url:" + url);
+           } catch (ClientProtocolException e) {
+               log.error("协议不匹配:\r\n",e);
+               resp.setStats(497);
+               resp.setResponse("协议不匹配:" + url.substring(0, url.indexOf(":")));
+           } catch (IOException e) {
+               log.error("IO异常:\r\n",e);
+               resp.setStats(701);
+               resp.setResponse("IO异常");
+           }finally {
+               if(httpClient!=null) {
+                   httpClient.getConnectionManager().shutdown();
+                   httpPost.abort();
+               }
+           }
+          return resp;
+       }
+	
+	/**
+     * post请求传参map
+     * @param url
+     * @param paramMap
+     * @param encode
+     * @param connTimeout
+     * @param readTimeout
+     * @return
+     * @throws IOException
+     */
+    public static HttpRespWrap  post(String url, Map<String, String> paramMap, String encode,Integer connTimeout,Integer readTimeout,String proxyIp,int proxyPort,boolean expectContinue) {
+           HttpRespWrap resp = new HttpRespWrap();
+           DefaultHttpClient httpClient = new DefaultHttpClient();
+           List<NameValuePair> params = new ArrayList<NameValuePair>();
+           for (String key : paramMap.keySet()) {
+                params.add(new BasicNameValuePair(key,  paramMap.get(key)));
+           }
+           httpClient.getParams().setParameter(CoreConnectionPNames.CONNECTION_TIMEOUT, connTimeout);
+           httpClient.getParams().setParameter(CoreConnectionPNames.SO_TIMEOUT,readTimeout);
+           HttpPost httpPost = new HttpPost(url);
+           try {
+               if(StringUtils.isNotEmpty(proxyIp)){
+                   HttpHost proxyHost = new HttpHost(proxyIp,proxyPort);
+                   httpClient.getParams().setParameter(ConnRoutePNames.DEFAULT_PROXY,proxyHost);
+                   if(expectContinue){
+                       httpClient.getParams().setParameter(CoreProtocolPNames.USE_EXPECT_CONTINUE, false);
+                   }
+               }
+               UrlEncodedFormEntity ent = new UrlEncodedFormEntity(params, encode);
+               httpPost.setEntity(ent);
+               HttpResponse response = httpClient.execute(httpPost);
+               String html = EntityUtils.toString(response.getEntity(),ENCODING);
+               log.info("http响应码:"+response.getStatusLine().getStatusCode());
+               resp.setStats(response.getStatusLine().getStatusCode());
+               resp.setResponse(html);
+               return resp;
+           }catch (UnsupportedEncodingException e) {
+               log.error("请求编码异常:\r\n",e);
+               resp.setStats(500);
+               resp.setResponse("请求超时,url:" + url);
+           }catch (ConnectTimeoutException e) {
+               log.error("请求超时:\r\n",e);
+               resp.setStats(499);
+               resp.setResponse("请求超时,url:" + url);
+           }  catch (SocketTimeoutException e) {
+               log.error("响应超时:\r\n",e);
+               resp.setStats(702);
+               resp.setResponse("响应超时,url:" + url);
+           } catch (ClientProtocolException e) {
+               log.error("协议不匹配:\r\n",e);
+               resp.setStats(497);
+               resp.setResponse("协议不匹配:" + url.substring(0, url.indexOf(":")));
+           } catch (IOException e) {
+               log.error("IO异常:\r\n",e);
+               resp.setStats(701);
+               resp.setResponse("IO异常");
+           }finally {
+               if(httpClient!=null) {
+                   httpClient.getConnectionManager().shutdown();
+                   httpPost.abort();
+               }
+           }
+          return resp;
+       }
+
+	/**
+	 * https xml post
+	 * @param url
+	 * @param xmlStr
+	 * @param charset
+	 * @return
+	 */
+	public static HttpRespWrap doPostHttpsXml(String url,String xmlStr,Integer connTimeout,
+											  Integer readTimeout,String charset) throws Exception{
+		HttpClient httpClient = null;
+		HttpPost httpPost = null;
+		String result = null;
+		HttpRespWrap resp = new HttpRespWrap();
+		try{
+			httpClient = new SSLClient();
+			httpPost = new HttpPost(url);
+			httpClient.getParams().setParameter(
+					CoreConnectionPNames.CONNECTION_TIMEOUT, connTimeout);// 连接超时：connectionTimeout
+			httpClient.getParams().setParameter(CoreConnectionPNames.SO_TIMEOUT,
+					readTimeout);// 读取数据超时：soTimeout
+			byte[] xmlDatas = xmlStr.getBytes(charset);
+			httpPost.setEntity(new ByteArrayEntity(xmlDatas));
+			HttpResponse response = httpClient.execute(httpPost);
+			if(response != null){
+				result = EntityUtils.toString(response.getEntity(),ENCODING);
+				resp.setStats(response.getStatusLine().getStatusCode());
+				resp.setResponse(result);
+			}
+		} catch (ConnectTimeoutException e) {
+			log.error("请求超时:\r\n",e);
+			resp.setStats(499);
+			resp.setResponse("请求超时,url:" + url);
+		}  catch (SocketTimeoutException e) {
+			log.error("响应超时:\r\n",e);
+			resp.setStats(702);
+			resp.setResponse("响应超时,url:" + url);
+		} catch (ClientProtocolException e) {
+			log.error("协议不匹配:\r\n",e);
+			resp.setStats(497);
+			resp.setResponse("协议不匹配:" + url.substring(0, url.indexOf(":")));
+		} catch (IOException e) {
+			log.error("IO异常:\r\n",e);
+			resp.setStats(701);
+			resp.setResponse("IO异常");
+		} finally {
+			if (httpClient != null) {
+				httpClient.getConnectionManager().shutdown();
+				httpPost.abort();
+			}
+		}
+		return resp;
+	}
+}
