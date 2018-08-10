@@ -6,13 +6,14 @@ import com.ownobj.aspect.service.IdCardService;
 public class IdCardServiceImpl implements IdCardService{
 
 
-	private IdCardDao idCardDao;
+	/*private IdCardDao idCardDao;
 	
 	public IdCardServiceImpl(IdCardDao idCardDao) {
 		this.idCardDao = idCardDao;
-	}
+	}*/
 	
 	public int getIdCardTotal(){
+		IdCardDao idCardDao = new IdCardDao();
 		return idCardDao.getTotal();
 	}
 	
