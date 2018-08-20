@@ -2,22 +2,5 @@ server:
   port: 9980
 
 spring:
-  datasource: 
-    url: jdbc:mysql://10.28.37.86:8066/usernew?useSSL=true&characterEncoding=utf-8&autoReconnect=true&failOverReadOnly=false
-    driver-class-name: com.mysql.jdbc.Driver
-    username: root
-    password: mycat_root
-    
-  http: 
-    encoding:
-      charset: UTF-8
-      force: true
-  application:  
-    name: ownObj  
-    
-logging: 
-  level: 
-    com.ownobj.aspect: debug    
-    
-    
-    
+  profiles:
+    active: dev
