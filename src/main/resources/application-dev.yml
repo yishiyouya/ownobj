@@ -4,10 +4,10 @@ server:
 
 spring:
   datasource: 
-    url: jdbc:mysql://10.28.37.86:8066/usernew?useSSL=true&characterEncoding=utf-8&autoReconnect=true&failOverReadOnly=false
+    url: jdbc:mysql://10.00.11.10:1111/user?useSSL=true&characterEncoding=utf-8&autoReconnect=true&failOverReadOnly=false
     driver-class-name: com.mysql.jdbc.Driver
-    username: root
-    password: mycat_root
+    username: budao
+    password: kankankan
     
   http: 
     encoding:
